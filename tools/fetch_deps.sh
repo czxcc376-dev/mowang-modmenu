@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetch pinned third-party sources into third_party/ and make them build with a
-# current NDK / clang.
+# current NDK / clang (NDK r27d, clang 18).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TP="$ROOT/third_party"
@@ -27,48 +27,93 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Dobby fixes for modern clang (NDK r27d / clang 18):
-#
-# 1) closure_bridge_arm64.asm is unguarded Mach-O syntax ("sym@PAGE",
-#    "sym@PAGEOFF").  clang's integrated assembler rejects it on ELF with
-#    "invalid fixup for add (uimm12)" / "invalid symbol kind for ADRP
-#    relocation".  Use the ELF forms instead.
-#
-# 2) dobby_static never receives BUILD_WITH_TRAMPOLINE_ASM (only the shared
-#    target does) and its compile definitions are passed as one bogus token.
+# Dobby @5dfc854 does not build out of the box with a modern NDK.  Fixes below.
 # ---------------------------------------------------------------------------
 python3 - "$TP/Dobby" <<'PY'
 import os, sys
 
 root = sys.argv[1]
 
-asm = os.path.join(root, "source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm")
-s = open(asm).read()
-if "@PAGE" in s or "@PAGEOFF" in s:
-    # NB: PAGEOFF must be replaced first, "@PAGE" is a prefix of "@PAGEOFF"
-    s = s.replace("cdecl(common_closure_bridge_handler)@PAGEOFF",
-                  ":lo12:cdecl(common_closure_bridge_handler)")
-    s = s.replace("cdecl(common_closure_bridge_handler)@PAGE",
-                  "cdecl(common_closure_bridge_handler)")
-    open(asm, "w").write(s)
-    print("   patched closure_bridge_arm64.asm -> ELF relocation syntax")
-else:
-    print("   closure_bridge_arm64.asm already ELF syntax")
 
-cml = os.path.join(root, "CMakeLists.txt")
-s = open(cml).read()
-old = '''target_compile_definitions(dobby_static PRIVATE
+def edit(rel, pairs, must=True):
+    p = os.path.join(root, rel)
+    s = open(p).read()
+    hit = False
+    for old, new in pairs:
+        if old in s:
+            s = s.replace(old, new, 1)
+            hit = True
+    if hit:
+        open(p, "w").write(s)
+    print("   %-58s %s" % (rel, "patched" if hit else ("ok" if not must else "UNCHANGED")))
+
+
+# 1) Mach-O relocation syntax in an .asm file that has no __APPLE__ guard.
+#    clang 18 rejects it on ELF ("invalid fixup for add (uimm12)").
+#    NB: @PAGEOFF must be replaced before @PAGE ("@PAGE" is a prefix of "@PAGEOFF").
+edit("source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm", [
+    ("cdecl(common_closure_bridge_handler)@PAGEOFF",
+     ":lo12:cdecl(common_closure_bridge_handler)"),
+    ("cdecl(common_closure_bridge_handler)@PAGE",
+     "cdecl(common_closure_bridge_handler)"),
+])
+
+# 2) dobby_static never receives BUILD_WITH_TRAMPOLINE_ASM and its compile
+#    definitions are handed to the compiler as one bogus token.
+edit("CMakeLists.txt", [(
+    '''target_compile_definitions(dobby_static PRIVATE
   "COMPILE_DEFINITIONS ${compile_definitions}"
-  )'''
-new = '''target_compile_definitions(dobby_static PRIVATE
+  )''',
+    '''target_compile_definitions(dobby_static PRIVATE
   BUILD_WITH_TRAMPOLINE_ASM
   DOBBY_LOGGING_DISABLE
-  )'''
-if old in s:
-    open(cml, "w").write(s.replace(old, new, 1))
-    print("   patched dobby_static compile definitions")
-else:
-    print("   dobby_static definitions already ok")
+  )''')])
+
+# 3) os_arch_features.h uses OSMemory/kReadExecute, which live in
+#    PlatformUnifiedInterface/platform.h -- but that header itself includes
+#    common.h -> this file, so they are not declared yet (circular include).
+edit("common/os_arch_features.h", [
+    ('''#if defined(ANDROID)
+  auto page = (void *)ALIGN_FLOOR(address, OSMemory::PageSize());
+  if (!OSMemory::SetPermission(page, OSMemory::PageSize(), kReadExecute)) {
+    return;
+  }
+#endif''',
+     '''#if defined(ANDROID)
+  size_t page_size = (size_t)getpagesize();
+  auto page = (void *)ALIGN_FLOOR(address, page_size);
+  if (mprotect(page, page_size, PROT_READ | PROT_EXEC) != 0) {
+    return;
+  }
+#endif'''),
+])
+
+# make sure <sys/mman.h>/<unistd.h> are available for the mprotect call above
+p = os.path.join(root, "common/os_arch_features.h")
+s = open(p).read()
+if "<sys/mman.h>" not in s:
+    lines = s.split("\n")
+    lines.insert(1, "#include <sys/mman.h>\n#include <unistd.h>")
+    open(p, "w").write("\n".join(lines))
+    print("   %-58s includes added" % "common/os_arch_features.h")
+
+# 4) RuntimeModule has only {base, path}, but ProcessRuntime.cc and the
+#    SymbolResolver plugin read module.load_address.
+edit("source/PlatformUtil/ProcessRuntime.h", [(
+    '''struct RuntimeModule {
+  void *base;
+  char path[1024];
+};''',
+    '''struct RuntimeModule {
+  void *base;
+  void *load_address;  /* used by ProcessRuntime.cc and the SymbolResolver plugin */
+  char path[1024];
+};''')])
+
+# 5) MemRange::start is a method, not a field.
+edit("source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc", [
+    ("return (a.start < b.start);", "return (a.start() < b.start());"),
+])
 PY
 
 echo ">> deps ready"
