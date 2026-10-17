@@ -94,6 +94,9 @@ def main() -> None:
     ap.add_argument("apk")
     ap.add_argument("--so", action="append", default=[])
     ap.add_argument("--abi", action="append", default=[])
+    ap.add_argument("--dex", action="append", default=[],
+                    metavar="ENTRY=FILE",
+                    help="replace an in-apk entry, e.g. classes3.dex=patched.dex")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -105,6 +108,15 @@ def main() -> None:
         if not os.path.isfile(so):
             sys.exit("missing %s" % so)
         libs[abi] = so
+
+    dex_repl = {}
+    for spec in a.dex:
+        if "=" not in spec:
+            sys.exit("--dex expects ENTRY=FILE")
+        entry, path = spec.split("=", 1)
+        if not os.path.isfile(path):
+            sys.exit("missing %s" % path)
+        dex_repl[entry] = path
 
     size = os.path.getsize(a.apk)
     with open(a.apk, "rb") as f:
@@ -156,6 +168,15 @@ def main() -> None:
             name = "lib/%s/%s" % (abi, NEEDED)
             data = open(so, "rb").read()
             new_payload.append((name, (name, data, 8, None)))
+
+        # --- replaced in-apk entries (e.g. the patched classes3.dex) ------
+        for entry, path in dex_repl.items():
+            if entry not in by_name:
+                sys.exit("apk has no entry %s" % entry)
+            rec = by_name[entry][1]
+            data = open(path, "rb").read()
+            new_payload.append((entry, (entry, data, rec["method"], rec)))
+            print("[+] replacing %s with %s (%d bytes)" % (entry, path, len(data)))
 
         # --- write the new apk -------------------------------------------
         with open(a.apk, "rb") as fin, open(a.out, "wb") as fout:

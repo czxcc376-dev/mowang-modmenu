@@ -46,7 +46,39 @@ const char *kBootstrap = R"JS(
   };
   MW.log = function(){ try { console.log.apply(console, arguments); } catch(e){} };
   g.__MW = MW;
-  MW.log('[MW] bootstrap v2 ok');
+
+  // --------------------------------------------------------------- touch
+  // The Cocos->JNI touch path never reaches handleAction*() in this build, so
+  // the menu reads touches from the game's own JS input system instead, which
+  // is known to work (the game plays fine).  Coordinates are mirrored into a
+  // file that libmwmenu polls each frame.
+  MW.touchPath = null;
+  MW.installTouch = function(path){
+    if (MW.touchInstalled) { MW.touchPath = path; return true; }
+    if (typeof cc === 'undefined' || !cc.input || !cc.Input) { return false; }
+    MW.touchPath = path;
+    var fs = null;
+    try { fs = jsb.fileUtils; } catch(e) {}
+    if (!fs) { return false; }
+
+    MW.push = function(x, y, down){
+      try { fs.writeStringToFile(MW.touchPath, x + ',' + y + ',' + (down ? 1 : 0)); } catch(e){}
+    };
+    var E = cc.Input.EventType;
+    cc.input.on(E.TOUCH_START,  function(e){ var l = e.getLocation(); MW.push(l.x, l.y, true);  });
+    cc.input.on(E.TOUCH_MOVE,   function(e){ var l = e.getLocation(); MW.push(l.x, l.y, true);  });
+    cc.input.on(E.TOUCH_END,    function(e){ var l = e.getLocation(); MW.push(l.x, l.y, false); });
+    cc.input.on(E.TOUCH_CANCEL, function(e){ var l = e.getLocation(); MW.push(l.x, l.y, false); });
+    MW.touchInstalled = true;
+    MW.log('[MW] touch bridge installed -> ' + path);
+    return true;
+  };
+
+  // Expose the menu state so JS can drive it too.
+  MW.setMenuRect = function(x, y, w, h){ MW.rect = {x:x, y:y, w:w, h:h}; };
+
+  g.__MW = MW;
+  MW.log('[MW] bootstrap v3 ok');
 })();
 )JS";
 

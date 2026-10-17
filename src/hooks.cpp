@@ -1,6 +1,7 @@
 #include "hooks.h"
 #include "cheats.h"
 #include "menu.h"
+#include "touchbridge.h"
 #include "jni_env.h"
 #include "log.h"
 
@@ -170,6 +171,9 @@ EglSwapDamageFn orig_swap_khr = nullptr;   // eglSwapBuffersWithDamageKHR
 EglSwapDamageFn orig_swap_ext = nullptr;   // eglSwapBuffersWithDamageEXT
 
 std::atomic<unsigned long long> g_frames{0};
+float g_jsX = -1.f, g_jsY = -1.f;
+int   g_jsDown = 0;
+bool  g_touchBridgeTried = false;
 std::atomic<int>                g_probeLogs{0};
 std::atomic<unsigned>           g_skipLogs{0};
 std::atomic<pid_t>              g_renderTid{-1};
@@ -220,6 +224,18 @@ void renderFrame(EGLDisplay dpy, EGLSurface surf) {
         }
         if (f % 60 == 0) LOGW("swap#%llu no-imgui surf=%p %dx%d", f, surf, w, h);
         return;
+    }
+
+    // Prefer the JS touch bridge; fall back to the (never firing) JNI hooks.
+    TouchBridge_Poll(&g_jsX, &g_jsY, &g_jsDown);
+    if (g_jsX >= 0.f) {
+        g_touchX.store(g_jsX);
+        g_touchY.store(g_jsY);
+        g_touchDown.store(g_jsDown);
+    }
+    // Install the bridge as soon as the JS bootstrap is up.
+    if (!g_touchBridgeTried) {
+        if (TouchBridge_Install()) g_touchBridgeTried = true;
     }
 
     ImGuiIO &io = ImGui::GetIO();
