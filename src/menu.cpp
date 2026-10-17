@@ -68,16 +68,20 @@ void Menu_Draw() {
     }
 
     // ------------------------------------------------------------- panel
-    ImGui::SetNextWindowSize(ImVec2(470, 680), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(470, 700), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.90f);
     bool open = true;
-    if (ImGui::Begin("MoWang Mod v1  (Cocos 3.7.3 / V8)", &open,
+    if (ImGui::Begin("MoWang Mod v2  (Cocos 3.7.3 / V8)", &open,
                      base | ImGuiWindowFlags_NoSavedSettings)) {
         ImGui::TextColored(st.accent, "com.niaowustudio.imnodemonlord.green");
-        ImGui::TextWrapped("JS 通道: CocosJavascriptJavaBridge.evalString\n"
-                           "挂钩: libEGL!eglSwapBuffers + libcocos!CocosTouchHandler.*");
         ImGui::SameLine();
         if (ImGui::SmallButton("X")) g_cheat.menuVisible.store(false);
+
+        section("登录 / 授权 (Login)");
+        toggle("签名校验绕过  Bypass Signature", g_cheat.bypassSign,
+               "Redirects TapSDK CommonUtils.getMD5 so the server sees the original\n"
+               "certificate digest (921ee83d...). Default: ON.");
+        ImGui::TextDisabled("上报摘要: 921ee83de604256b2e27e624d6cfd635");
 
         section("战斗 (Battle)");
         if (toggle("上帝模式  God Mode", g_cheat.god, "CharaDataManager.setGodMode(true) + setInvulnerable(true)"))

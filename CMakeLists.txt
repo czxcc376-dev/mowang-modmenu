@@ -23,9 +23,6 @@ target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_ES3)
 
 # ------------------------------------------------------------------- dobby
-# A plain inline-hook engine.  No linker interception: ShadowHook's linker mod
-# fails ("Init linker mod failed", errno 12) in this process, which killed every
-# hook.  Dobby only needs the target address.
 set(DOBBY_DIR ${TP}/Dobby)
 if(NOT EXISTS ${DOBBY_DIR}/CMakeLists.txt)
   message(FATAL_ERROR "third_party/Dobby missing -- run tools/fetch_deps.sh")
@@ -35,8 +32,7 @@ set(DOBBY_BUILD_EXAMPLE    OFF CACHE BOOL "" FORCE)
 set(DOBBY_BUILD_TEST       OFF CACHE BOOL "" FORCE)
 set(Plugin.SymbolResolver  ON  CACHE BOOL "" FORCE)
 add_subdirectory(${DOBBY_DIR} ${CMAKE_BINARY_DIR}/dobby_build)
-# we link dobby_static; the shared target is not needed (and its non-PIC
-# adrp against common_closure_bridge_handler used to fail to link)
+# we link dobby_static; the shared target pulls non-PIC relocations
 set_target_properties(dobby PROPERTIES EXCLUDE_FROM_ALL TRUE)
 
 # ------------------------------------------------------------------ module
@@ -45,7 +41,8 @@ add_library(mwmenu SHARED
   src/hooks.cpp
   src/menu.cpp
   src/cheats.cpp
-  src/jni_env.cpp)
+  src/jni_env.cpp
+  src/signspoof.cpp)          # TapSDK signature bypass
 
 target_include_directories(mwmenu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mwmenu PRIVATE imgui dobby_static android log EGL GLESv3)

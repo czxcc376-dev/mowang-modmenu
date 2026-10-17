@@ -4,6 +4,7 @@
 // ------------------------------------------------------------------ state
 struct CheatState {
     std::atomic<bool> menuVisible{true};
+    std::atomic<bool> bypassSign{true};   // TapSDK signature spoof, on by default
     std::atomic<bool> god{false};         // CharaDataManager.setGodMode + setInvulnerable
     std::atomic<bool> lockHp{false};      // re-write _hp = maxHp
     std::atomic<bool> oneHit{false};      // attack damage = huge
@@ -36,3 +37,8 @@ void Cheats_ApplySpeedMul(bool on, int mul);
 void Cheats_AddMoney(long long delta);
 void Cheats_DumpState();
 void Cheats_Reset();
+
+// ---- TapSDK signature bypass (implemented in signspoof.cpp) --------------
+// Redirects CommonUtils.getMD5([B)String so TapSDK reports the original
+// certificate digest.  Returns true once the redirect is actually installed.
+bool SignSpoof_Install();

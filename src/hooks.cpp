@@ -257,43 +257,60 @@ EGLBoolean hooked_swap_ext(EGLDisplay d, EGLSurface s, EGLint *rects, EGLint n) 
 }
 
 // ------------------------------------------------- Cocos JNI touch handlers
-typedef jboolean (*TouchDownFn)(JNIEnv *, jclass, jint, jfloat, jfloat, jint);
-typedef jboolean (*TouchMoveFn)(JNIEnv *, jclass, jint, jintArray, jfloatArray, jfloatArray);
+// Java declarations (com/cocos/lib/CocosTouchHandler):
+//   native void handleActionDown(int windowId, int pointerId, float x, float y)
+//   native void handleActionUp  (int windowId, int pointerId, float x, float y)
+//   native void handleActionMove(int windowId, int[] ids, float[] xs, float[] ys)
+//   native void handleActionCancel(int windowId, int[] ids, float[] xs, float[] ys)
+// They return void and are always invoked on the game thread, because
+// onTouchEvent() posts them through CocosHelper.runOnGameThreadAtForeground().
+typedef void (*TouchFn)(JNIEnv *, jclass, jint, jint, jfloat, jfloat);
+typedef void (*TouchMultiFn)(JNIEnv *, jclass, jint, jintArray, jfloatArray, jfloatArray);
 
-TouchDownFn orig_down = nullptr;
-TouchDownFn orig_up = nullptr;
-TouchDownFn orig_cancel = nullptr;
-TouchMoveFn orig_move = nullptr;
+TouchFn orig_down = nullptr;
+TouchFn orig_up = nullptr;
+TouchMultiFn orig_cancel = nullptr;
+TouchMultiFn orig_move = nullptr;
 
-jboolean hooked_down(JNIEnv *env, jclass c, jint id, jfloat x, jfloat y, jint extra) {
+static std::atomic<int> g_touchLogs{0};
+
+void hooked_down(JNIEnv *env, jclass c, jint window, jint id, jfloat x, jfloat y) {
     g_touchX.store(x); g_touchY.store(y); g_touchDown.store(1);
-    if (shouldSwallow(x, y)) return JNI_TRUE;
-    return orig_down ? orig_down(env, c, id, x, y, extra) : JNI_TRUE;
+    if (g_touchLogs.fetch_add(1) < 20)
+        LOGI("touch down win=%d id=%d %.0f,%.0f", window, id, x, y);
+    if (shouldSwallow(x, y)) return;
+    if (orig_down) orig_down(env, c, window, id, x, y);
 }
 
-jboolean hooked_up(JNIEnv *env, jclass c, jint id, jfloat x, jfloat y, jint extra) {
+void hooked_up(JNIEnv *env, jclass c, jint window, jint id, jfloat x, jfloat y) {
     g_touchX.store(x); g_touchY.store(y); g_touchDown.store(0);
-    if (shouldSwallow(x, y)) return JNI_TRUE;
-    return orig_up ? orig_up(env, c, id, x, y, extra) : JNI_TRUE;
+    if (shouldSwallow(x, y)) return;
+    if (orig_up) orig_up(env, c, window, id, x, y);
 }
 
-jboolean hooked_cancel(JNIEnv *env, jclass c, jint id, jfloat x, jfloat y, jint extra) {
-    g_touchDown.store(0);
-    if (shouldSwallow(x, y)) return JNI_TRUE;
-    return orig_cancel ? orig_cancel(env, c, id, x, y, extra) : JNI_TRUE;
-}
-
-jboolean hooked_move(JNIEnv *env, jclass c, jint id, jintArray ids, jfloatArray xs, jfloatArray ys) {
-    if (xs && ys) {
-        if (env->GetArrayLength(xs) > 0 && env->GetArrayLength(ys) > 0) {
-            float fx = 0, fy = 0;
-            env->GetFloatArrayRegion(xs, 0, 1, &fx);
-            env->GetFloatArrayRegion(ys, 0, 1, &fy);
-            g_touchX.store(fx); g_touchY.store(fy); g_touchDown.store(1);
-        }
+// Move / Cancel carry arrays; the first pointer drives the menu.
+static void handleMulti(JNIEnv *env, jclass c, jint window, jintArray ids,
+                        jfloatArray xs, jfloatArray ys, bool release,
+                        TouchMultiFn orig) {
+    if (xs && ys && env->GetArrayLength(xs) > 0 && env->GetArrayLength(ys) > 0) {
+        float fx = 0, fy = 0;
+        env->GetFloatArrayRegion(xs, 0, 1, &fx);
+        env->GetFloatArrayRegion(ys, 0, 1, &fy);
+        g_touchX.store(fx); g_touchY.store(fy);
+        g_touchDown.store(release ? 0 : 1);
     }
-    if (shouldSwallow(g_touchX.load(), g_touchY.load())) return JNI_TRUE;
-    return orig_move ? orig_move(env, c, id, ids, xs, ys) : JNI_TRUE;
+    if (shouldSwallow(g_touchX.load(), g_touchY.load())) return;
+    if (orig) orig(env, c, window, ids, xs, ys);
+}
+
+void hooked_cancel(JNIEnv *env, jclass c, jint window, jintArray ids,
+                   jfloatArray xs, jfloatArray ys) {
+    handleMulti(env, c, window, ids, xs, ys, true, orig_cancel);
+}
+
+void hooked_move(JNIEnv *env, jclass c, jint window, jintArray ids,
+                 jfloatArray xs, jfloatArray ys) {
+    handleMulti(env, c, window, ids, xs, ys, false, orig_move);
 }
 
 // ---------------------------------------------------------------- installer

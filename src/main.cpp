@@ -5,6 +5,7 @@
 // so no Java-side call is required.  JNI_OnLoad() is NOT invoked for libraries
 // loaded that way -- everything starts from a constructor.
 #include "hooks.h"
+#include "cheats.h"
 #include "jni_env.h"
 #include "log.h"
 
@@ -65,6 +66,13 @@ void *worker(void *) {
 
     if (MW_ResolveEngine()) LOGI("JS bridge resolved");
     else LOGW("JS bridge not resolved yet (retried lazily on first use)");
+
+    // TapSDK initialises well after the engine, so retry the signature redirect
+    // for a while. SignSpoof_Install() is idempotent and logs its own outcome.
+    for (int i = 0; i < 120; ++i) {
+        if (SignSpoof_Install()) break;
+        usleep(500 * 1000);
+    }
 
     LOGI("worker done");
     return nullptr;
