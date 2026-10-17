@@ -55,7 +55,10 @@ const char *kBootstrap = R"JS(
   MW.touchPath = null;
   MW.installTouch = function(path){
     if (MW.touchInstalled) { MW.touchPath = path; return true; }
-    if (typeof cc === 'undefined' || !cc.input || !cc.Input) { return false; }
+    if (typeof cc === 'undefined' || !cc.input || !cc.Input) {
+      MW.log('[MW] installTouch: cc.input not ready');
+      return false;
+    }
     MW.touchPath = path;
     var fs = null;
     try { fs = jsb.fileUtils; } catch(e) {}
@@ -70,6 +73,7 @@ const char *kBootstrap = R"JS(
     cc.input.on(E.TOUCH_END,    function(e){ var l = e.getLocation(); MW.push(l.x, l.y, false); });
     cc.input.on(E.TOUCH_CANCEL, function(e){ var l = e.getLocation(); MW.push(l.x, l.y, false); });
     MW.touchInstalled = true;
+    try { fs.writeStringToFile(MW.touchPath, '-1,-1,0'); } catch(e){}
     MW.log('[MW] touch bridge installed -> ' + path);
     return true;
   };

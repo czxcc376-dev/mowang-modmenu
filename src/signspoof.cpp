@@ -29,7 +29,10 @@ namespace {
 // 92:1E:E8:3D:E6:04:25:6B:2E:27:E6:24:D6:CF:D6:35
 // CommonUtils.getHashString() renders bytes via Integer.toHexString(), so the
 // string getSign() produced was lowercase, 32 chars, no separators.
-const char *kOriginalMd5 = "921ee83de604256b2e27e624d6cfd635";
+// The server compares GateKeeperRequest.packageSign against the fingerprint
+// registered in the TapTap console, which is the certificate's SHA-256
+// (EC:E5:01:39:...:0B:D7).  The MD5 form did not match, so ship the SHA-256.
+const char *kOriginalSign = "ECE50139FA8F41D26D096F1426EAC377623EDCEB2A426D5F65ED84D492C10BD7";
 
 std::atomic<int> g_logs{0};
 
@@ -174,8 +177,8 @@ bool computeRealMd5(JNIEnv *env, char out[33]) {
 jstring JNICALL mw_getSign(JNIEnv *env, jobject thiz, jobject context) {
     (void) thiz; (void) context;
     if (g_cheat.bypassSign.load()) {
-        if (g_logs.fetch_add(1) < 8) LOGI("TapSignKit.getSign -> spoofed %s", kOriginalMd5);
-        return env->NewStringUTF(kOriginalMd5);
+        if (g_logs.fetch_add(1) < 8) LOGI("TapSignKit.getSign -> spoofed %s", kOriginalSign);
+        return env->NewStringUTF(kOriginalSign);
     }
     char real[33] = {0};
     if (computeRealMd5(env, real)) {
@@ -183,7 +186,7 @@ jstring JNICALL mw_getSign(JNIEnv *env, jobject thiz, jobject context) {
         return env->NewStringUTF(real);
     }
     LOGW("TapSignKit.getSign -> real digest failed, using original");
-    return env->NewStringUTF(kOriginalMd5);
+    return env->NewStringUTF(kOriginalSign);
 }
 
 const char *kCls   = "com/taptap/sdk/kit/internal/utils/TapSignKit";

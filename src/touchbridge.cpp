@@ -82,15 +82,23 @@ static bool resolveTouchPath() {
 bool TouchBridge_Install() {
     if (g_installed) return true;
     if (!resolveTouchPath()) return false;
-    if (!g_cheat.bootstrapped.load()) return false;   // need __MW first
 
     char js[512];
     snprintf(js, sizeof(js),
              "__MW.installTouch(%s);", ("'" + g_touchPath + "'").c_str());
     if (!Cheats_RawJS(js)) return false;
 
+    // The JS side writes a marker into the file once the listeners are attached;
+    // its presence is the only reliable confirmation that cc.input was ready.
+    struct stat st{};
+    if (stat(g_touchPath.c_str(), &st) != 0) {
+        static int tries = 0;
+        if (tries++ % 20 == 0) LOGW("touch bridge: JS not ready yet (attempt %d)", tries);
+        return false;                       // retry next frame
+    }
+
     g_installed = true;
-    LOGI("touch bridge requested");
+    LOGI("touch bridge installed -> %s", g_touchPath.c_str());
     return true;
 }
 
