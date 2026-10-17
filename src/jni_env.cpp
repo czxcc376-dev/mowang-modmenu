@@ -18,9 +18,6 @@ jclass g_bridgeClass = nullptr;   // global ref, com/cocos/lib/CocosJavascriptJa
 const char *kBridgeClass = "com/cocos/lib/CocosJavascriptJavaBridge";
 const char *kEvalSymbol = "Java_com_cocos_lib_CocosJavascriptJavaBridge_evalString";
 
-// Provide the JNI symbols the game's libcocos.so expects at runtime.
-// (None needed -- we only *call* into it.)
-
 } // namespace
 
 void MW_SetJavaVM(JavaVM *vm) {
@@ -62,6 +59,48 @@ JNIEnv *MW_GetEnv() {
         return nullptr;
     }
     return env;
+}
+
+bool MW_GetScreenSize(int *ow, int *oh) {
+    JNIEnv *env = MW_GetEnv();
+    if (!env) return false;
+    bool ok = false;
+
+    jclass clsAT = env->FindClass("android/app/ActivityThread");
+    jclass clsCtx = env->FindClass("android/content/Context");
+    jclass clsRes = env->FindClass("android/content/res/Resources");
+    jclass clsDm  = env->FindClass("android/util/DisplayMetrics");
+    if (clsAT && clsCtx && clsRes && clsDm) {
+        jmethodID mCur = env->GetStaticMethodID(clsAT, "currentApplication", "()Landroid/app/Application;");
+        jmethodID mGetRes = env->GetMethodID(clsCtx, "getResources", "()Landroid/content/res/Resources;");
+        jmethodID mGetDm = env->GetMethodID(clsRes, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;");
+        jfieldID fW = env->GetFieldID(clsDm, "widthPixels", "I");
+        jfieldID fH = env->GetFieldID(clsDm, "heightPixels", "I");
+        if (mCur && mGetRes && mGetDm && fW && fH) {
+            jobject app = env->CallStaticObjectMethod(clsAT, mCur);
+            if (app) {
+                jobject res = env->CallObjectMethod(app, mGetRes);
+                if (res) {
+                    jobject dm = env->CallObjectMethod(res, mGetDm);
+                    if (dm) {
+                        jint w = env->GetIntField(dm, fW);
+                        jint h = env->GetIntField(dm, fH);
+                        if (w > 0 && h > 0) { *ow = w; *oh = h; ok = true; }
+                        env->DeleteLocalRef(dm);
+                    }
+                    env->DeleteLocalRef(res);
+                }
+                env->DeleteLocalRef(app);
+            }
+        }
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (clsAT) env->DeleteLocalRef(clsAT);
+    if (clsCtx) env->DeleteLocalRef(clsCtx);
+    if (clsRes) env->DeleteLocalRef(clsRes);
+    if (clsDm) env->DeleteLocalRef(clsDm);
+    if (!ok) LOGW("MW_GetScreenSize failed");
+    return ok;
 }
 
 bool MW_ResolveEngine() {

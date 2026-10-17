@@ -49,12 +49,12 @@ static inline bool shouldSwallow(float x, float y) {
 }
 
 // ==========================================================================
-// ImGui / GLES renderer
+// ImGui / GLES
 // ==========================================================================
 namespace {
 
-bool      g_imguiReady = false;
-std::atomic<int> g_menuOpen{1};
+bool g_imguiReady = false;
+int  g_imguiAttempts = 0;
 
 const char *kFonts[] = {
     "/system/fonts/NotoSansCJK-Regular.ttc",
@@ -67,98 +67,142 @@ const char *kFonts[] = {
 void applyStyle() {
     ImGui::StyleColorsDark();
     ImGuiStyle &s = ImGui::GetStyle();
-    s.WindowRounding   = 10.0f;
-    s.FrameRounding    = 6.0f;
-    s.GrabRounding     = 6.0f;
+    s.WindowRounding    = 10.0f;
+    s.FrameRounding     = 6.0f;
+    s.GrabRounding      = 6.0f;
     s.ScrollbarRounding = 6.0f;
-    s.WindowBorderSize = 1.0f;
-    s.FramePadding     = ImVec2(14, 10);
-    s.ItemSpacing      = ImVec2(10, 12);
-    s.ScrollbarSize    = 26.0f;
-    s.GrabMinSize      = 22.0f;
-    s.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+    s.WindowBorderSize  = 1.0f;
+    s.FramePadding      = ImVec2(14, 10);
+    s.ItemSpacing       = ImVec2(10, 12);
+    s.ScrollbarSize     = 26.0f;
+    s.GrabMinSize       = 22.0f;
+    s.WindowTitleAlign  = ImVec2(0.0f, 0.5f);
     ImVec4 *c = s.Colors;
-    c[ImGuiCol_WindowBg]   = ImVec4(0.06f, 0.07f, 0.09f, 0.94f);
-    c[ImGuiCol_TitleBg]    = ImVec4(0.10f, 0.75f, 0.60f, 0.85f);
+    c[ImGuiCol_WindowBg]      = ImVec4(0.06f, 0.07f, 0.09f, 0.94f);
+    c[ImGuiCol_TitleBg]       = ImVec4(0.10f, 0.75f, 0.60f, 0.85f);
     c[ImGuiCol_TitleBgActive] = ImVec4(0.10f, 0.75f, 0.60f, 1.00f);
-    c[ImGuiCol_CheckMark]  = ImVec4(0.10f, 0.90f, 0.70f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.10f, 0.85f, 0.68f, 1.00f);
-    c[ImGuiCol_Button]     = ImVec4(0.16f, 0.20f, 0.26f, 1.00f);
+    c[ImGuiCol_CheckMark]     = ImVec4(0.10f, 0.90f, 0.70f, 1.00f);
+    c[ImGuiCol_SliderGrab]    = ImVec4(0.10f, 0.85f, 0.68f, 1.00f);
+    c[ImGuiCol_Button]        = ImVec4(0.16f, 0.20f, 0.26f, 1.00f);
     c[ImGuiCol_ButtonHovered] = ImVec4(0.16f, 0.55f, 0.46f, 1.00f);
 }
 
-void initImGui() {
-    ImGui::CreateContext();
-    ImGuiIO &io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-    io.MouseDrawCursor = false;
+// Returns true when ImGui is fully usable. Retried a few times if it fails
+// (the first swap can happen before the GL context is what we expect).
+void tryInitImGui() {
+    if (g_imguiReady || g_imguiAttempts >= 3) return;
+    ++g_imguiAttempts;
 
-    applyStyle();
+    if (g_imguiAttempts == 1) {
+        ImGui::CreateContext();
+        ImGuiIO &io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.LogFilename = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+        applyStyle();
 
-    ImFont *font = nullptr;
-    for (const char *p : kFonts) {
-        if (access(p, R_OK) != 0) continue;
-        ImFontConfig cfg;
-        cfg.OversampleH = 2;
-        cfg.OversampleV = 1;
-        cfg.PixelSnapH  = true;
-        font = io.Fonts->AddFontFromFileTTF(p, 30.0f, &cfg,
-                                            io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-        if (font) { LOGI("font loaded: %s", p); break; }
-    }
-    if (!font) {
-        io.Fonts->AddFontDefault();
-        LOGW("no CJK font found, falling back to default");
-    }
-
-    const char *glv = (const char *) glGetString(GL_VERSION);
-    const char *glsl = (glv && strstr(glv, "OpenGL ES 3")) ? "#version 300 es" : "#version 100";
-    LOGI("GL_VERSION=%s -> %s", glv ? glv : "?", glsl);
-
-    if (!ImGui_ImplOpenGL3_Init(glsl)) {
-        LOGE("ImGui_ImplOpenGL3_Init failed");
-        return;
-    }
-    g_imguiReady = true;
-    LOGI("ImGui ready");
-}
-
-// ---------------------------------------------------------- eglSwapBuffers
-typedef EGLBoolean (*EglSwapBuffersFn)(EGLDisplay, EGLSurface);
-EglSwapBuffersFn orig_swap = nullptr;
-
-EGLBoolean hooked_swap(EGLDisplay dpy, EGLSurface surf) {
-    static std::atomic<int> inited{0};
-    if (inited.load() == 0) {
-        if (inited.exchange(1) == 0) initImGui();
-    }
-
-    if (g_imguiReady && !orig_swap) {
-        // nothing
-    }
-
-    if (g_imguiReady) {
-        int w = 0, h = 0;
-        eglQuerySurface(dpy, surf, EGL_WIDTH, &w);
-        eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
-        if (w > 0 && h > 0) {
-            ImGuiIO &io = ImGui::GetIO();
-            io.DisplaySize = ImVec2((float) w, (float) h);
-            io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
-            io.AddMousePosEvent(g_touchX.load(), g_touchY.load());
-            io.AddMouseButtonEvent(0, g_touchDown.load() != 0);
-
-            ImGui::NewFrame();
-            Menu_Draw();
-            Cheats_Tick();
-            ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        ImFont *font = nullptr;
+        for (const char *p : kFonts) {
+            if (access(p, R_OK) != 0) continue;
+            ImFontConfig cfg;
+            cfg.OversampleH = 2;
+            cfg.OversampleV = 1;
+            cfg.PixelSnapH  = true;
+            font = io.Fonts->AddFontFromFileTTF(p, 28.0f, &cfg,
+                                                io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+            if (font) { LOGI("font: %s", p); break; }
+        }
+        if (!font) {
+            io.Fonts->AddFontDefault();
+            LOGW("no CJK font, using default atlas");
         }
     }
 
-    return orig_swap ? orig_swap(dpy, surf) : EGL_TRUE;
+    const char *glv  = (const char *) glGetString(GL_VERSION);
+    const char *glsl = (glv && strstr(glv, "OpenGL ES 3")) ? "#version 300 es" : "#version 100";
+    LOGI("attempt#%d GL_VERSION=%s -> %s", g_imguiAttempts, glv ? glv : "?", glsl);
+
+    if (ImGui_ImplOpenGL3_Init(glsl)) {
+        g_imguiReady = true;
+        LOGI("ImGui ready");
+    } else {
+        LOGE("ImGui_ImplOpenGL3_Init FAILED (attempt %d)", g_imguiAttempts);
+    }
+}
+
+// ---- EGL swap entry points ------------------------------------------------
+// libcocos.so does NOT import eglSwapBuffers; it resolves everything through
+// eglGetProcAddress() and prefers eglSwapBuffersWithDamageKHR, so all three
+// entry points have to be intercepted.
+typedef EGLBoolean (*EglSwapFn)(EGLDisplay, EGLSurface);
+typedef EGLBoolean (*EglSwapDamageFn)(EGLDisplay, EGLSurface, EGLint *, EGLint);
+
+EglSwapFn       orig_swap        = nullptr;   // eglSwapBuffers
+EglSwapDamageFn orig_swap_khr    = nullptr;   // eglSwapBuffersWithDamageKHR
+EglSwapDamageFn orig_swap_ext    = nullptr;   // eglSwapBuffersWithDamageEXT
+
+std::atomic<unsigned long long> g_frames{0};
+
+void renderFrame(EGLDisplay dpy, EGLSurface surf) {
+    tryInitImGui();
+
+    const unsigned long long f = g_frames.fetch_add(1) + 1;
+
+    int w = 0, h = 0;
+    if (eglQuerySurface(dpy, surf, EGL_WIDTH, &w) != EGL_TRUE) w = 0;
+    if (eglQuerySurface(dpy, surf, EGL_HEIGHT, &h) != EGL_TRUE) h = 0;
+    if (w <= 0 || h <= 0) MW_GetScreenSize(&w, &h);
+    if (w <= 0 || h <= 0) { w = 1080; h = 1920; }
+
+    if (!g_imguiReady) {
+        // liveness marker: a red square in the bottom-left corner. If you see
+        // this, the swap hook IS firing and the problem is ImGui itself.
+        if (f % 30 == 1) {
+            glViewport(0, 0, w, h);
+            glDisable(GL_SCISSOR_TEST);
+            glDisable(GL_DEPTH_TEST);
+            glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(0, 0, 90, 90);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDisable(GL_SCISSOR_TEST);
+            LOGW("liveness marker drawn (ImGui not ready)");
+        }
+        if (f % 60 == 0) LOGW("swap#%llu no-imgui surf=%p %dx%d", f, surf, w, h);
+        return;
+    }
+
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float) w, (float) h);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    io.AddMousePosEvent(g_touchX.load(), g_touchY.load());
+    io.AddMouseButtonEvent(0, g_touchDown.load() != 0);
+
+    ImGui::NewFrame();
+    Menu_Draw();
+    Cheats_Tick();
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    if (f == 1 || f % 60 == 0)
+        LOGI("swap#%llu surf=%p %dx%d menu=%d touch=%.0f,%.0f",
+             f, surf, w, h, (int) g_cheat.menuVisible.load(),
+             g_touchX.load(), g_touchY.load());
+}
+
+EGLBoolean hooked_swap(EGLDisplay d, EGLSurface s) {
+    renderFrame(d, s);
+    return orig_swap ? orig_swap(d, s) : EGL_TRUE;
+}
+
+EGLBoolean hooked_swap_khr(EGLDisplay d, EGLSurface s, EGLint *rects, EGLint n) {
+    renderFrame(d, s);
+    return orig_swap_khr ? orig_swap_khr(d, s, rects, n) : EGL_TRUE;
+}
+
+EGLBoolean hooked_swap_ext(EGLDisplay d, EGLSurface s, EGLint *rects, EGLint n) {
+    renderFrame(d, s);
+    return orig_swap_ext ? orig_swap_ext(d, s, rects, n) : EGL_TRUE;
 }
 
 // ------------------------------------------------- Cocos JNI touch handlers
@@ -167,8 +211,8 @@ typedef jboolean (*TouchMoveFn)(JNIEnv *, jclass, jint, jintArray, jfloatArray, 
 
 TouchDownFn orig_down = nullptr;
 TouchDownFn orig_up = nullptr;
-TouchMoveFn orig_move = nullptr;
 TouchDownFn orig_cancel = nullptr;
+TouchMoveFn orig_move = nullptr;
 
 jboolean hooked_down(JNIEnv *env, jclass c, jint id, jfloat x, jfloat y, jint extra) {
     g_touchX.store(x); g_touchY.store(y); g_touchDown.store(1);
@@ -190,9 +234,7 @@ jboolean hooked_cancel(JNIEnv *env, jclass c, jint id, jfloat x, jfloat y, jint 
 
 jboolean hooked_move(JNIEnv *env, jclass c, jint id, jintArray ids, jfloatArray xs, jfloatArray ys) {
     if (xs && ys) {
-        jsize n = env->GetArrayLength(xs);
-        jsize n2 = env->GetArrayLength(ys);
-        if (n > 0 && n2 > 0) {
+        if (env->GetArrayLength(xs) > 0 && env->GetArrayLength(ys) > 0) {
             float fx = 0, fy = 0;
             env->GetFloatArrayRegion(xs, 0, 1, &fx);
             env->GetFloatArrayRegion(ys, 0, 1, &fy);
@@ -203,50 +245,47 @@ jboolean hooked_move(JNIEnv *env, jclass c, jint id, jintArray ids, jfloatArray 
     return orig_move ? orig_move(env, c, id, ids, xs, ys) : JNI_TRUE;
 }
 
+// ---------------------------------------------------------------- installer
+void *hookName(const char *lib, const char *sym, void *newFn, void **orig) {
+    if (*orig) return *orig;                      // already installed
+    void *stub = shadowhook_hook_sym_name(lib, sym, newFn, orig);
+    if (stub) {
+        LOGI("hooked %s!%s -> orig=%p", lib, sym, *orig);
+    } else {
+        LOGW("hook %s!%s failed: %s", lib, sym,
+             shadowhook_to_errmsg(shadowhook_get_errno()));
+    }
+    return stub;
+}
+
 } // namespace
 
-// ==========================================================================
 int Hooks_Install() {
-    int n = 0;
-
-    int rc = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
-    if (rc != 0) {
-        LOGE("shadowhook_init failed: %d (%s)", rc, shadowhook_to_errmsg(rc));
-    } else {
-        LOGI("shadowhook %s ready", shadowhook_get_version());
+    static bool shInit = false;
+    if (!shInit) {
+        int rc = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
+        if (rc != 0) LOGE("shadowhook_init: %d (%s)", rc, shadowhook_to_errmsg(rc));
+        else { shInit = true; LOGI("shadowhook %s ready", shadowhook_get_version()); }
     }
 
-    void *stub;
+    int n = 0;
 
-    stub = shadowhook_hook_sym_name("libEGL.so", "eglSwapBuffers",
-                                    (void *) hooked_swap, (void **) &orig_swap);
-    if (stub) { n++; LOGI("hooked eglSwapBuffers -> orig=%p", (void *) orig_swap); }
-    else LOGE("hook eglSwapBuffers failed: %s", shadowhook_to_errmsg(shadowhook_get_errno()));
+    // the game presents through the KHR damage variant -> hook all three
+    if (hookName("libEGL.so", "eglSwapBuffers", (void *) hooked_swap, (void **) &orig_swap)) n++;
+    if (hookName("libEGL.so", "eglSwapBuffersWithDamageKHR",
+                 (void *) hooked_swap_khr, (void **) &orig_swap_khr)) n++;
+    if (hookName("libEGL.so", "eglSwapBuffersWithDamageEXT",
+                 (void *) hooked_swap_ext, (void **) &orig_swap_ext)) n++;
 
-    stub = shadowhook_hook_sym_name("libcocos.so",
-                                    "Java_com_cocos_lib_CocosTouchHandler_handleActionDown",
-                                    (void *) hooked_down, (void **) &orig_down);
-    if (stub) { n++; LOGI("hooked handleActionDown"); }
-    else LOGE("hook handleActionDown failed: %s", shadowhook_to_errmsg(shadowhook_get_errno()));
+    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionDown",
+                 (void *) hooked_down, (void **) &orig_down)) n++;
+    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionUp",
+                 (void *) hooked_up, (void **) &orig_up)) n++;
+    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionCancel",
+                 (void *) hooked_cancel, (void **) &orig_cancel)) n++;
+    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionMove",
+                 (void *) hooked_move, (void **) &orig_move)) n++;
 
-    stub = shadowhook_hook_sym_name("libcocos.so",
-                                    "Java_com_cocos_lib_CocosTouchHandler_handleActionUp",
-                                    (void *) hooked_up, (void **) &orig_up);
-    if (stub) { n++; LOGI("hooked handleActionUp"); }
-    else LOGE("hook handleActionUp failed: %s", shadowhook_to_errmsg(shadowhook_get_errno()));
-
-    stub = shadowhook_hook_sym_name("libcocos.so",
-                                    "Java_com_cocos_lib_CocosTouchHandler_handleActionCancel",
-                                    (void *) hooked_cancel, (void **) &orig_cancel);
-    if (stub) { n++; LOGI("hooked handleActionCancel"); }
-    else LOGE("hook handleActionCancel failed: %s", shadowhook_to_errmsg(shadowhook_get_errno()));
-
-    stub = shadowhook_hook_sym_name("libcocos.so",
-                                    "Java_com_cocos_lib_CocosTouchHandler_handleActionMove",
-                                    (void *) hooked_move, (void **) &orig_move);
-    if (stub) { n++; LOGI("hooked handleActionMove"); }
-    else LOGE("hook handleActionMove failed: %s", shadowhook_to_errmsg(shadowhook_get_errno()));
-
-    LOGI("hooks installed: %d/5", n);
+    LOGI("hooks installed: %d/7", n);
     return n;
 }

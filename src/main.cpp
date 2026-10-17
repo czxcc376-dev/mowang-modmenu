@@ -1,9 +1,9 @@
 // libmwmenu.so -- Cocos Creator 3.7.3 (V8) mod menu for
 // com.niaowustudio.imnodemonlord.green
 //
-// Loaded as a DT_NEEDED dependency of lib/arm64-v8a/libcocos.so (or via any
-// injector).  JNI_OnLoad() is NOT called for DT_NEEDED libraries, so all work
-// starts from a constructor.
+// Loaded automatically as a DT_NEEDED dependency of lib/arm64-v8a/libcocos.so,
+// so no Java-side call is required.  JNI_OnLoad() is NOT invoked for libraries
+// loaded that way -- everything starts from a constructor.
 #include "hooks.h"
 #include "jni_env.h"
 #include "log.h"
@@ -40,24 +40,29 @@ void *worker(void *) {
     }
     LOGI("worker start, vm=%p", vm);
 
-    if (!wait_dlopen("libcocos.so", 600)) {
+    if (!wait_dlopen("libcocos.so", 900)) {
         LOGE("libcocos.so never appeared, aborting");
         return nullptr;
     }
     LOGI("libcocos.so present");
 
-    if (!wait_dlopen("libEGL.so", 600)) {
-        LOGE("libEGL.so never appeared, hooks will be partial");
-    } else {
-        LOGI("libEGL.so present");
+    // Let the linker finish bringing up the engine before patching prologues.
+    usleep(1200 * 1000);
+
+    for (int i = 0; i < 20; ++i) {
+        if (!wait_dlopen("libEGL.so", 1)) {
+            usleep(700 * 1000);
+            continue;
+        }
+        int n = Hooks_Install();
+        if (n >= 7) break;
+        usleep(700 * 1000);
     }
 
-    int n = Hooks_Install();
-    LOGI("Hooks_Install -> %d", n);
-
     if (MW_ResolveEngine()) LOGI("JS bridge resolved");
-    else LOGW("JS bridge not resolved yet (will retry on first use)");
+    else LOGW("JS bridge not resolved yet (retried lazily on first use)");
 
+    LOGI("worker done");
     return nullptr;
 }
 
