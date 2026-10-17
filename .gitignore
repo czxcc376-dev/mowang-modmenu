@@ -1,0 +1,7 @@
+third_party/
+build/
+build-*/
+*.apk
+*.so
+*.jks
+*.keystore

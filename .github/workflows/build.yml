@@ -1,0 +1,108 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: '(optional) direct URL to the original APK to repackage'
+        required: false
+        default: ''
+
+env:
+  NDK_VERSION: r27d
+
+jobs:
+  build:
+    name: libmwmenu (${{ matrix.abi }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [ arm64-v8a, armeabi-v7a ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
+
+      - name: Fetch third-party sources
+        run: bash tools/fetch_deps.sh
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-${{ matrix.abi }} \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_ARM_MODE=arm \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-${{ matrix.abi }} -j"$(nproc)"
+
+      - name: Inspect artefact
+        run: |
+          ls -l build-${{ matrix.abi }}/libmwmenu.so
+          file build-${{ matrix.abi }}/libmwmenu.so || true
+          readelf -d build-${{ matrix.abi }}/libmwmenu.so | grep -E "NEEDED|SONAME" || true
+          readelf --dyn-syms build-${{ matrix.abi }}/libmwmenu.so | grep -c JNI_OnLoad || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libmwmenu-${{ matrix.abi }}
+          path: build-${{ matrix.abi }}/libmwmenu.so
+          if-no-files-found: error
+
+  package:
+    name: repackage APK
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apk_url != '' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf zipalign apksigner
+
+      - name: Fetch original APK
+        run: curl -L --fail --max-time 1200 -o original.apk "${{ github.event.inputs.apk_url }}"
+
+      - name: Make debug keystore
+        run: |
+          keytool -genkeypair -v -keystore ks.jks -storepass android -keypass android \
+            -alias mw -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=MW, OU=MW, O=MW, L=-, ST=-, C=CN"
+
+      - name: Inject libs and sign
+        run: |
+          python3 tools/mkinject.py original.apk \
+            --so artefacts/libmwmenu-arm64-v8a/libmwmenu.so \
+            --abi arm64-v8a \
+            --so artefacts/libmwmenu-armeabi-v7a/libmwmenu.so \
+            --abi armeabi-v7a \
+            --out patched-unsigned.apk
+          zipalign -p -f 4 patched-unsigned.apk patched-aligned.apk
+          apksigner sign --ks ks.jks --ks-pass pass:android --key-pass pass:android \
+            --out mowang-modded.apk patched-aligned.apk
+          apksigner verify --print-certs mowang-modded.apk | head -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mowang-modded-apk
+          path: mowang-modded.apk
+          if-no-files-found: error
