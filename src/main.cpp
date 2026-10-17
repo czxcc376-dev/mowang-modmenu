@@ -49,13 +49,17 @@ void *worker(void *) {
     // Let the linker finish bringing up the engine before patching prologues.
     usleep(1200 * 1000);
 
+    int last = -1;
     for (int i = 0; i < 20; ++i) {
         if (!wait_dlopen("libEGL.so", 1)) {
             usleep(700 * 1000);
             continue;
         }
         int n = Hooks_Install();
-        if (n >= 7) break;
+        // 7/7 is impossible on devices without eglSwapBuffersWithDamageEXT,
+        // so stop as soon as nothing new can be installed.
+        if (n >= 6 || n == last) break;
+        last = n;
         usleep(700 * 1000);
     }
 

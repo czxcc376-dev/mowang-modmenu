@@ -5,9 +5,12 @@
 #include "log.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <EGL/egl.h>
@@ -49,11 +52,35 @@ static inline bool shouldSwallow(float x, float y) {
     return (x >= mx && x <= mx + mw && y >= my && y <= my + mh);
 }
 
-// ==========================================================================
-// ImGui / GLES
-// ==========================================================================
 namespace {
 
+pid_t gettid_() { return (pid_t) syscall(SYS_gettid); }
+
+void readThreadName(char *out, size_t n) {
+    out[0] = 0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/comm", (int) gettid_());
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return;
+    ssize_t r = read(fd, out, n - 1);
+    close(fd);
+    if (r <= 0) { out[0] = 0; return; }
+    out[r] = 0;
+    char *nl = strchr(out, '\n');
+    if (nl) *nl = 0;
+}
+
+// libhwui composites the Android UI in the same process through the same
+// eglSwapBuffers* entry points.  Drawing our menu there broke everything, so
+// those threads are filtered out.
+bool looksLikeUiCompositor(const char *n) {
+    return strstr(n, "RenderThread") || strstr(n, "hwui") ||
+           strstr(n, "Skia") || strstr(n, "GPU");
+}
+
+// ======================================================================
+// ImGui / GLES
+// ======================================================================
 bool g_imguiReady = false;
 int  g_imguiAttempts = 0;
 
@@ -122,6 +149,8 @@ void tryInitImGui() {
     LOGI("attempt#%d GL_VERSION=%s -> %s", g_imguiAttempts, glv ? glv : "?", glsl);
 
     if (ImGui_ImplOpenGL3_Init(glsl)) {
+        // the GL3 backend creates the font texture on its first NewFrame()
+        ImGui_ImplOpenGL3_NewFrame();
         g_imguiReady = true;
         LOGI("ImGui ready");
     } else {
@@ -141,10 +170,34 @@ EglSwapDamageFn orig_swap_khr = nullptr;   // eglSwapBuffersWithDamageKHR
 EglSwapDamageFn orig_swap_ext = nullptr;   // eglSwapBuffersWithDamageEXT
 
 std::atomic<unsigned long long> g_frames{0};
+std::atomic<int>                g_probeLogs{0};
+std::atomic<unsigned>           g_skipLogs{0};
+std::atomic<pid_t>              g_renderTid{-1};
 
 void renderFrame(EGLDisplay dpy, EGLSurface surf) {
-    tryInitImGui();
+    const pid_t tid = gettid_();
+    char tname[32];
+    readThreadName(tname, sizeof(tname));
 
+    if (g_probeLogs.fetch_add(1) < 40) {
+        LOGI("swap probe: tid=%d '%s' main=%d claimed=%d",
+             (int) tid, tname, (int) (tid == getpid()), (int) g_renderTid.load());
+    }
+    if (looksLikeUiCompositor(tname)) return;   // Android UI, not the game
+
+    pid_t cur = g_renderTid.load();
+    if (cur < 0) {
+        g_renderTid.store(tid);
+        cur = tid;
+        LOGI("claimed render thread: tid=%d '%s'", (int) tid, tname);
+    }
+    if (tid != cur) {
+        if ((g_skipLogs.fetch_add(1) % 300) == 0)
+            LOGW("skip swap from tid=%d '%s'", (int) tid, tname);
+        return;
+    }
+
+    tryInitImGui();
     const unsigned long long f = g_frames.fetch_add(1) + 1;
 
     int w = 0, h = 0;
@@ -154,8 +207,6 @@ void renderFrame(EGLDisplay dpy, EGLSurface surf) {
     if (w <= 0 || h <= 0) { w = 1080; h = 1920; }
 
     if (!g_imguiReady) {
-        // liveness marker: red square, bottom-left. Seeing it means the swap
-        // hook fires and the problem is ImGui itself.
         if (f % 30 == 1) {
             glViewport(0, 0, w, h);
             glDisable(GL_SCISSOR_TEST);
@@ -177,6 +228,7 @@ void renderFrame(EGLDisplay dpy, EGLSurface surf) {
     io.AddMousePosEvent(g_touchX.load(), g_touchY.load());
     io.AddMouseButtonEvent(0, g_touchDown.load() != 0);
 
+    ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     Menu_Draw();
     Cheats_Tick();
