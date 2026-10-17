@@ -1,5 +1,6 @@
 #include "hooks.h"
 #include "cheats.h"
+#include "menu.h"
 #include "jni_env.h"
 #include "log.h"
 
