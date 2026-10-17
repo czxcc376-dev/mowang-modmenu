@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fetch pinned third-party sources into third_party/.
+# Fetch pinned third-party sources into third_party/ and make them build with a
+# current NDK / clang.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TP="$ROOT/third_party"
@@ -25,13 +26,36 @@ else
   echo ">> Dobby already present"
 fi
 
-# --- Dobby's own CMakeLists never gives dobby_static the asm-trampoline define
-# (only the shared target gets it) and passes the defines as one bogus token.
-# Rewrite that block so the static library is built the same way as the shared one.
-python3 - "$TP/Dobby/CMakeLists.txt" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
+# ---------------------------------------------------------------------------
+# Dobby fixes for modern clang (NDK r27d / clang 18):
+#
+# 1) closure_bridge_arm64.asm is unguarded Mach-O syntax ("sym@PAGE",
+#    "sym@PAGEOFF").  clang's integrated assembler rejects it on ELF with
+#    "invalid fixup for add (uimm12)" / "invalid symbol kind for ADRP
+#    relocation".  Use the ELF forms instead.
+#
+# 2) dobby_static never receives BUILD_WITH_TRAMPOLINE_ASM (only the shared
+#    target does) and its compile definitions are passed as one bogus token.
+# ---------------------------------------------------------------------------
+python3 - "$TP/Dobby" <<'PY'
+import os, sys
+
+root = sys.argv[1]
+
+asm = os.path.join(root, "source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm")
+s = open(asm).read()
+if "@PAGE" in s or "@PAGEOFF" in s:
+    s = s.replace("cdecl(common_closure_bridge_handler)@PAGE",
+                  "cdecl(common_closure_bridge_handler)")
+    s = s.replace("cdecl(common_closure_bridge_handler)@PAGEOFF",
+                  ":lo12:cdecl(common_closure_bridge_handler)")
+    open(asm, "w").write(s)
+    print("   patched closure_bridge_arm64.asm -> ELF relocation syntax")
+else:
+    print("   closure_bridge_arm64.asm already ELF syntax")
+
+cml = os.path.join(root, "CMakeLists.txt")
+s = open(cml).read()
 old = '''target_compile_definitions(dobby_static PRIVATE
   "COMPILE_DEFINITIONS ${compile_definitions}"
   )'''
@@ -40,12 +64,10 @@ new = '''target_compile_definitions(dobby_static PRIVATE
   DOBBY_LOGGING_DISABLE
   )'''
 if old in s:
-    open(p, 'w').write(s.replace(old, new, 1))
+    open(cml, "w").write(s.replace(old, new, 1))
     print("   patched dobby_static compile definitions")
-elif 'BUILD_WITH_TRAMPOLINE_ASM' in s:
-    print("   dobby_static definitions already ok")
 else:
-    sys.exit("cannot patch Dobby/CMakeLists.txt (layout changed)")
+    print("   dobby_static definitions already ok")
 PY
 
 echo ">> deps ready"
