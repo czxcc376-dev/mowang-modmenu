@@ -228,6 +228,10 @@ void renderFrame(EGLDisplay dpy, EGLSurface surf) {
     io.AddMousePosEvent(g_touchX.load(), g_touchY.load());
     io.AddMouseButtonEvent(0, g_touchDown.load() != 0);
 
+    // CocosTouchHandler.onTouchEvent() only posts a Runnable; handleAction*() run
+    // when this queue is drained.  Drain it ourselves so touches arrive.
+    MW_FlushCocosTasks();
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     Menu_Draw();

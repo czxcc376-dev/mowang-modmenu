@@ -157,10 +157,11 @@ extern "C" bool SignSpoof_Install() {
     JNIEnv *env = MW_GetEnv();
     if (!env) { LOGW("sign spoof: no JNIEnv"); return false; }
 
-    jclass cls = env->FindClass(kCls);
+    // must go through the app ClassLoader (a thread attached by us sees only the
+    // system loader, which is why FindClass used to fail here every time)
+    jclass cls = MW_FindAppClass(env, kCls);
     if (!cls) {
         env->ExceptionClear();          // TapSDK not loaded yet -> retry later
-        LOGW("sign spoof: %s not loaded yet", kCls);
         return false;
     }
 
@@ -186,7 +187,7 @@ extern "C" bool SignSpoof_Install() {
 
     // Self-check: call it once so a broken redirect shows up in the log
     // instead of silently failing at login time.
-    jclass c2 = env->FindClass(kCls);
+    jclass c2 = MW_FindAppClass(env, kCls);
     if (c2) {
         jmethodID m = env->GetStaticMethodID(c2, kName, kProto);
         if (m) {

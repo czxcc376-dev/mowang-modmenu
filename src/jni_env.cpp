@@ -15,8 +15,15 @@ typedef jint (*EvalStringFn)(JNIEnv *, jclass, jstring);
 EvalStringFn g_evalString = nullptr;
 jclass g_bridgeClass = nullptr;   // global ref, com/cocos/lib/CocosJavascriptJavaBridge
 
+jobject g_appLoader = nullptr;    // global ref, java.lang.ClassLoader of the app
+
 const char *kBridgeClass = "com/cocos/lib/CocosJavascriptJavaBridge";
 const char *kEvalSymbol = "Java_com_cocos_lib_CocosJavascriptJavaBridge_evalString";
+
+// ---- cached handles for the per-frame queue flush -------------------------
+jclass g_helperClass = nullptr;   // global ref, com/cocos/lib/CocosHelper
+jmethodID g_flushTasks = nullptr; // static void flushTasksOnGameThreadAtForeground()
+bool g_flushBroken = false;
 
 } // namespace
 
@@ -61,6 +68,69 @@ JNIEnv *MW_GetEnv() {
     return env;
 }
 
+// ---------------------------------------------------------------------------
+// ClassLoader
+// A native thread attached by us has the *system* ClassLoader as its context, so
+// plain FindClass("com/taptap/...") fails.  Everything must go through the
+// application's own loader.
+// ---------------------------------------------------------------------------
+static bool cacheAppLoader(JNIEnv *env) {
+    if (g_appLoader) return true;
+
+    jclass clsAT = env->FindClass("android/app/ActivityThread");
+    if (!clsAT) { env->ExceptionClear(); return false; }
+    jmethodID mCur = env->GetStaticMethodID(clsAT, "currentApplication",
+                                            "()Landroid/app/Application;");
+    env->DeleteLocalRef(clsAT);
+    if (!mCur) { env->ExceptionClear(); return false; }
+
+    jclass clsAT2 = env->FindClass("android/app/ActivityThread");
+    jobject app = env->CallStaticObjectMethod(clsAT2, mCur);
+    env->DeleteLocalRef(clsAT2);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!app) return false;
+
+    jclass clsCtx = env->FindClass("android/content/Context");
+    jmethodID mLoader = clsCtx
+        ? env->GetMethodID(clsCtx, "getClassLoader", "()Ljava/lang/ClassLoader;")
+        : nullptr;
+    if (clsCtx) env->DeleteLocalRef(clsCtx);
+
+    jobject loader = mLoader ? env->CallObjectMethod(app, mLoader) : nullptr;
+    env->DeleteLocalRef(app);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!loader) return false;
+
+    g_appLoader = env->NewGlobalRef(loader);
+    env->DeleteLocalRef(loader);
+    if (g_appLoader) LOGI("app ClassLoader cached");
+    return g_appLoader != nullptr;
+}
+
+jclass MW_FindAppClass(JNIEnv *env, const char *name) {
+    if (!env) return nullptr;
+    if (!g_appLoader && !cacheAppLoader(env)) return nullptr;
+
+    jclass clsLoader = env->FindClass("java/lang/ClassLoader");
+    if (!clsLoader) { env->ExceptionClear(); return nullptr; }
+    jmethodID mLoad = env->GetMethodID(clsLoader, "loadClass",
+                                       "(Ljava/lang/String;)Ljava/lang/Class;");
+    env->DeleteLocalRef(clsLoader);
+    if (!mLoad) { env->ExceptionClear(); return nullptr; }
+
+    // binary name uses dots
+    char dotted[256];
+    size_t n = strlen(name);
+    if (n >= sizeof(dotted)) return nullptr;
+    for (size_t i = 0; i <= n; ++i) dotted[i] = (name[i] == '/') ? '.' : name[i];
+
+    jstring jn = env->NewStringUTF(dotted);
+    jobject c = env->CallObjectMethod(g_appLoader, mLoad, jn);
+    env->DeleteLocalRef(jn);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return (jclass) c;
+}
+
 bool MW_GetScreenSize(int *ow, int *oh) {
     JNIEnv *env = MW_GetEnv();
     if (!env) return false;
@@ -99,10 +169,45 @@ bool MW_GetScreenSize(int *ow, int *oh) {
     if (clsCtx) env->DeleteLocalRef(clsCtx);
     if (clsRes) env->DeleteLocalRef(clsRes);
     if (clsDm) env->DeleteLocalRef(clsDm);
-    if (!ok) LOGW("MW_GetScreenSize failed");
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// CocosHelper.flushTasksOnGameThreadAtForeground()
+// ---------------------------------------------------------------------------
+void MW_FlushCocosTasks() {
+    if (g_flushBroken) return;
+    JNIEnv *env = MW_GetEnv();
+    if (!env) return;
+
+    if (!g_flushTasks) {
+        if (!g_helperClass) {
+            jclass c = MW_FindAppClass(env, "com/cocos/lib/CocosHelper");
+            if (!c) return;                       // engine not up yet
+            g_helperClass = (jclass) env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+            if (!g_helperClass) return;
+        }
+        g_flushTasks = env->GetStaticMethodID(
+            g_helperClass, "flushTasksOnGameThreadAtForeground", "()V");
+        if (!g_flushTasks) {
+            env->ExceptionClear();
+            LOGW("CocosHelper.flushTasksOnGameThreadAtForeground not found");
+            g_flushBroken = true;
+            return;
+        }
+        LOGI("CocosHelper queue flush resolved");
+    }
+
+    env->CallStaticVoidMethod(g_helperClass, g_flushTasks);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        g_flushBroken = true;
+        LOGW("flushTasksOnGameThreadAtForeground threw, disabled");
+    }
+}
+
+// ---------------------------------------------------------------------------
 bool MW_ResolveEngine() {
     pthread_mutex_lock(&g_lock);
     bool ok = true;
@@ -127,14 +232,11 @@ bool MW_ResolveEngine() {
     if (!g_bridgeClass) {
         JNIEnv *env = MW_GetEnv();
         if (env) {
-            jclass local = env->FindClass(kBridgeClass);
-            if (local) {
-                g_bridgeClass = (jclass) env->NewGlobalRef(local);
-                env->DeleteLocalRef(local);
+            jclass c = MW_FindAppClass(env, kBridgeClass);
+            if (c) {
+                g_bridgeClass = (jclass) env->NewGlobalRef(c);
+                env->DeleteLocalRef(c);
                 LOGI("bridge class cached");
-            } else {
-                env->ExceptionClear();
-                LOGW("FindClass(%s) not ready yet", kBridgeClass);
             }
         }
     }
