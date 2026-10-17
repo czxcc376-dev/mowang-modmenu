@@ -27,7 +27,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Dobby @5dfc854 does not build out of the box with a modern NDK.  Fixes below.
+# Dobby @5dfc854 does not build out of the box with a modern NDK. Fixes below.
 # ---------------------------------------------------------------------------
 python3 - "$TP/Dobby" <<'PY'
 import os, sys
@@ -46,6 +46,16 @@ def edit(rel, pairs, must=True):
     if hit:
         open(p, "w").write(s)
     print("   %-58s %s" % (rel, "patched" if hit else ("ok" if not must else "UNCHANGED")))
+
+
+def create(rel, content):
+    p = os.path.join(root, rel)
+    if os.path.exists(p):
+        print("   %-58s exists" % rel)
+        return
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(content)
+    print("   %-58s created" % rel)
 
 
 # 1) Mach-O relocation syntax in an .asm file that has no __APPLE__ guard.
@@ -88,7 +98,6 @@ edit("common/os_arch_features.h", [
 #endif'''),
 ])
 
-# make sure <sys/mman.h>/<unistd.h> are available for the mprotect call above
 p = os.path.join(root, "common/os_arch_features.h")
 s = open(p).read()
 if "<sys/mman.h>" not in s:
@@ -114,6 +123,21 @@ edit("source/PlatformUtil/ProcessRuntime.h", [(
 edit("source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc", [
     ("return (a.start < b.start);", "return (a.start() < b.start());"),
 ])
+
+# 6) core/arch/Cpu.h is referenced by six translation units but is not shipped
+#    in this commit.  Only CpuFeatures is needed; nothing in the Android build
+#    links against it (the definitions live in the unused *-dummy.cc files).
+create("source/core/arch/Cpu.h", '''#pragma once
+// Reconstructed: jmpews/Dobby @5dfc854 includes "core/arch/Cpu.h" from several
+// translation units but does not ship the file.
+#include <stddef.h>
+
+class CpuFeatures {
+public:
+  static void FlushICache(void *start, void *end);
+  static void ClearCache(void *start, void *end);
+};
+''')
 PY
 
 echo ">> deps ready"
