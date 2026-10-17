@@ -35,6 +35,8 @@ bool g_flushBroken = false;
 // singleton's address from ELF offsets proved unreliable, so the call is made
 // under a SIGSEGV guard instead: a fault simply means "not ready, try later".
 // ---------------------------------------------------------------------------
+bool g_engineReady = false;
+
 struct EvalCall {
     EvalStringFn fn;
     JNIEnv *env;
