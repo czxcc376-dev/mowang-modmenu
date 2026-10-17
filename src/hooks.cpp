@@ -275,7 +275,7 @@ bool installHook(const char *lib, const char *sym, void *newFn, void **orig) {
 
 int Hooks_Install() {
     static bool logged = false;
-    if (!logged) { logged = true; LOGI("hook engine: Dobby %s", DobbyGetVersion()); }
+    if (!logged) { logged = true; LOGI("hook engine: Dobby (inline, no linker interception)"); }
 
     int n = 0;
     if (installHook("libEGL.so", "eglSwapBuffers",
