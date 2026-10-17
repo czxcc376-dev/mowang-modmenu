@@ -25,6 +25,19 @@ jclass g_helperClass = nullptr;   // global ref, com/cocos/lib/CocosHelper
 jmethodID g_flushTasks = nullptr; // static void flushTasksOnGameThreadAtForeground()
 bool g_flushBroken = false;
 
+// ---- script engine readiness ---------------------------------------------
+// evalString() (arm64 vaddr 0x39bbd8) starts with
+//     0x39bc00  bl   0x3bcc00
+//   0x3bcc00  adrp x8, #0x1a04000
+//   0x3bcc04  ldr  x0, [x8, #0x1b8]     <- se::ScriptEngine singleton
+//   0x3bcc08  ret
+// Calling evalString while that singleton is null dereferences it and dies
+// (fault addr 0xa4b8, frame evalString+56).  Guard on the pointer instead of
+// calling blindly.
+const uintptr_t kEngineSingletonOff = 0x1a041b8;
+void **g_engineSingletonSlot = nullptr;
+bool  g_engineReady = false;
+
 } // namespace
 
 void MW_SetJavaVM(JavaVM *vm) {
@@ -69,10 +82,8 @@ JNIEnv *MW_GetEnv() {
 }
 
 // ---------------------------------------------------------------------------
-// ClassLoader
-// A native thread attached by us has the *system* ClassLoader as its context, so
-// plain FindClass("com/taptap/...") fails.  Everything must go through the
-// application's own loader.
+// ClassLoader: a thread we attached only sees the system loader, so all app
+// classes must be resolved through the Application's own ClassLoader.
 // ---------------------------------------------------------------------------
 static bool cacheAppLoader(JNIEnv *env) {
     if (g_appLoader) return true;
@@ -81,12 +92,10 @@ static bool cacheAppLoader(JNIEnv *env) {
     if (!clsAT) { env->ExceptionClear(); return false; }
     jmethodID mCur = env->GetStaticMethodID(clsAT, "currentApplication",
                                             "()Landroid/app/Application;");
-    env->DeleteLocalRef(clsAT);
-    if (!mCur) { env->ExceptionClear(); return false; }
+    if (!mCur) { env->ExceptionClear(); env->DeleteLocalRef(clsAT); return false; }
 
-    jclass clsAT2 = env->FindClass("android/app/ActivityThread");
-    jobject app = env->CallStaticObjectMethod(clsAT2, mCur);
-    env->DeleteLocalRef(clsAT2);
+    jobject app = env->CallStaticObjectMethod(clsAT, mCur);
+    env->DeleteLocalRef(clsAT);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
     if (!app) return false;
 
@@ -118,7 +127,6 @@ jclass MW_FindAppClass(JNIEnv *env, const char *name) {
     env->DeleteLocalRef(clsLoader);
     if (!mLoad) { env->ExceptionClear(); return nullptr; }
 
-    // binary name uses dots
     char dotted[256];
     size_t n = strlen(name);
     if (n >= sizeof(dotted)) return nullptr;
@@ -172,9 +180,6 @@ bool MW_GetScreenSize(int *ow, int *oh) {
     return ok;
 }
 
-// ---------------------------------------------------------------------------
-// CocosHelper.flushTasksOnGameThreadAtForeground()
-// ---------------------------------------------------------------------------
 void MW_FlushCocosTasks() {
     if (g_flushBroken) return;
     JNIEnv *env = MW_GetEnv();
@@ -183,7 +188,7 @@ void MW_FlushCocosTasks() {
     if (!g_flushTasks) {
         if (!g_helperClass) {
             jclass c = MW_FindAppClass(env, "com/cocos/lib/CocosHelper");
-            if (!c) return;                       // engine not up yet
+            if (!c) return;
             g_helperClass = (jclass) env->NewGlobalRef(c);
             env->DeleteLocalRef(c);
             if (!g_helperClass) return;
@@ -208,6 +213,23 @@ void MW_FlushCocosTasks() {
 }
 
 // ---------------------------------------------------------------------------
+// Script engine readiness
+// ---------------------------------------------------------------------------
+static bool engineSlotValid() {
+    if (!g_engineSingletonSlot) {
+        Dl_info info{};
+        // address of any exported symbol in libcocos is enough to get the base
+        void *probe = (void *) g_evalString;
+        if (!probe) return false;
+        if (!dladdr(probe, &info) || !info.dli_fbase) return false;
+        g_engineSingletonSlot = (void **) ((uintptr_t) info.dli_fbase + kEngineSingletonOff);
+        LOGI("engine singleton slot = %p (base %p)", (void *) g_engineSingletonSlot, info.dli_fbase);
+    }
+    void *engine = nullptr;
+    memcpy(&engine, g_engineSingletonSlot, sizeof(void *));
+    return engine != nullptr;
+}
+
 bool MW_ResolveEngine() {
     pthread_mutex_lock(&g_lock);
     bool ok = true;
@@ -249,8 +271,21 @@ bool MW_RunJS(const char *code) {
     if (!g_evalString || !g_bridgeClass) {
         if (!MW_ResolveEngine()) return false;
     }
+    if (!g_evalString) return false;
+
+    // Never call into the engine before it exists.
+    if (!g_engineReady) {
+        if (!engineSlotValid()) {
+            static int n = 0;
+            if (n++ % 200 == 0) LOGW("script engine not initialised yet, skipping JS");
+            return false;
+        }
+        g_engineReady = true;
+        LOGI("script engine is up, JS injection enabled");
+    }
+
     JNIEnv *env = MW_GetEnv();
-    if (!env || !g_evalString || !g_bridgeClass) return false;
+    if (!env || !g_bridgeClass) return false;
 
     jstring js = env->NewStringUTF(code);
     if (!js) {

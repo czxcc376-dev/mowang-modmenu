@@ -149,9 +149,14 @@ void Cheats_Reset() {
 void Cheats_Tick() {
     int f = g_cheat.frames.fetch_add(1) + 1;
 
-    // one-shot bootstrap so __MW exists even before any button is pressed
-    if (!g_cheat.bootstrapped.exchange(true)) {
-        MW_RunJS(kBootstrap);
+    // one-shot bootstrap so __MW exists even before any button is pressed.
+    // MW_RunJS() refuses to run until the V8 engine is up, so keep trying until
+    // it succeeds instead of burning the single attempt on frame 1.
+    if (!g_cheat.bootstrapped.load()) {
+        if (MW_RunJS(kBootstrap)) {
+            g_cheat.bootstrapped.store(true);
+            LOGI("JS bootstrap injected");
+        }
     }
 
     if (f % 240 == 0) {
