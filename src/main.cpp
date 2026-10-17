@@ -34,12 +34,10 @@ void *wait_dlopen(const char *name, int tries) {
 void *worker(void *) {
     JavaVM *vm = nullptr;
     for (int i = 0; i < 600; ++i) {
-        jsize n = 0;
-        if (JNI_GetCreatedJavaVMs(&vm, 1, &n) == JNI_OK && n > 0 && vm) break;
-        vm = nullptr;
+        vm = MW_GetJavaVM();
+        if (vm) break;
         usleep(50 * 1000);
     }
-    MW_SetJavaVM(vm);
     LOGI("worker start, vm=%p", vm);
 
     if (!wait_dlopen("libcocos.so", 600)) {

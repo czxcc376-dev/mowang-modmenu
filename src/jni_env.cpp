@@ -30,13 +30,21 @@ void MW_SetJavaVM(JavaVM *vm) {
     }
 }
 
+// JNI_GetCreatedJavaVMs lives in libnativehelper/libart (not an NDK public stub),
+// so resolve it at runtime instead of linking against it.
 JavaVM *MW_GetJavaVM() {
     if (g_vm) return g_vm;
+    typedef jint (*GetVMsFn)(JavaVM **, jsize, jsize *);
+    static GetVMsFn getVMs = nullptr;
+    if (!getVMs) getVMs = (GetVMsFn) dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs");
+    if (!getVMs) {
+        static bool warned = false;
+        if (!warned) { warned = true; LOGE("dlsym(JNI_GetCreatedJavaVMs) failed"); }
+        return nullptr;
+    }
     JavaVM *vm = nullptr;
     jsize n = 0;
-    if (JNI_GetCreatedJavaVMs(&vm, 1, &n) == JNI_OK && n > 0) {
-        MW_SetJavaVM(vm);
-    }
+    if (getVMs(&vm, 1, &n) == JNI_OK && n > 0) MW_SetJavaVM(vm);
     return g_vm;
 }
 
