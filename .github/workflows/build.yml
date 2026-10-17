@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        abi: [ arm64-v8a, armeabi-v7a ]
+        abi: [ arm64-v8a ]   # Dobby's arm32 path is broken upstream (core/arch/Cpu.h missing)
     steps:
       - uses: actions/checkout@v4
 
@@ -93,8 +93,6 @@ jobs:
           python3 tools/mkinject.py original.apk \
             --so artefacts/libmwmenu-arm64-v8a/libmwmenu.so \
             --abi arm64-v8a \
-            --so artefacts/libmwmenu-armeabi-v7a/libmwmenu.so \
-            --abi armeabi-v7a \
             --out patched-unsigned.apk
           zipalign -p -f 4 patched-unsigned.apk patched-aligned.apk
           apksigner sign --ks ks.jks --ks-pass pass:android --key-pass pass:android \

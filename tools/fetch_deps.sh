@@ -45,10 +45,11 @@ root = sys.argv[1]
 asm = os.path.join(root, "source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm")
 s = open(asm).read()
 if "@PAGE" in s or "@PAGEOFF" in s:
-    s = s.replace("cdecl(common_closure_bridge_handler)@PAGE",
-                  "cdecl(common_closure_bridge_handler)")
+    # NB: PAGEOFF must be replaced first, "@PAGE" is a prefix of "@PAGEOFF"
     s = s.replace("cdecl(common_closure_bridge_handler)@PAGEOFF",
                   ":lo12:cdecl(common_closure_bridge_handler)")
+    s = s.replace("cdecl(common_closure_bridge_handler)@PAGE",
+                  "cdecl(common_closure_bridge_handler)")
     open(asm, "w").write(s)
     print("   patched closure_bridge_arm64.asm -> ELF relocation syntax")
 else:
