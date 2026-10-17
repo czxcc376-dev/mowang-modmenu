@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstring>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <unistd.h>
 
 #include <EGL/egl.h>
@@ -16,7 +17,7 @@
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
 
-#include <shadowhook.h>
+#include "dobby.h"
 
 // ==========================================================================
 // shared input state (written by UI thread touch hooks, read by GL thread)
@@ -87,8 +88,6 @@ void applyStyle() {
     c[ImGuiCol_ButtonHovered] = ImVec4(0.16f, 0.55f, 0.46f, 1.00f);
 }
 
-// Returns true when ImGui is fully usable. Retried a few times if it fails
-// (the first swap can happen before the GL context is what we expect).
 void tryInitImGui() {
     if (g_imguiReady || g_imguiAttempts >= 3) return;
     ++g_imguiAttempts;
@@ -137,9 +136,9 @@ void tryInitImGui() {
 typedef EGLBoolean (*EglSwapFn)(EGLDisplay, EGLSurface);
 typedef EGLBoolean (*EglSwapDamageFn)(EGLDisplay, EGLSurface, EGLint *, EGLint);
 
-EglSwapFn       orig_swap        = nullptr;   // eglSwapBuffers
-EglSwapDamageFn orig_swap_khr    = nullptr;   // eglSwapBuffersWithDamageKHR
-EglSwapDamageFn orig_swap_ext    = nullptr;   // eglSwapBuffersWithDamageEXT
+EglSwapFn       orig_swap     = nullptr;   // eglSwapBuffers
+EglSwapDamageFn orig_swap_khr = nullptr;   // eglSwapBuffersWithDamageKHR
+EglSwapDamageFn orig_swap_ext = nullptr;   // eglSwapBuffersWithDamageEXT
 
 std::atomic<unsigned long long> g_frames{0};
 
@@ -155,8 +154,8 @@ void renderFrame(EGLDisplay dpy, EGLSurface surf) {
     if (w <= 0 || h <= 0) { w = 1080; h = 1920; }
 
     if (!g_imguiReady) {
-        // liveness marker: a red square in the bottom-left corner. If you see
-        // this, the swap hook IS firing and the problem is ImGui itself.
+        // liveness marker: red square, bottom-left. Seeing it means the swap
+        // hook fires and the problem is ImGui itself.
         if (f % 30 == 1) {
             glViewport(0, 0, w, h);
             glDisable(GL_SCISSOR_TEST);
@@ -246,45 +245,54 @@ jboolean hooked_move(JNIEnv *env, jclass c, jint id, jintArray ids, jfloatArray 
 }
 
 // ---------------------------------------------------------------- installer
-void *hookName(const char *lib, const char *sym, void *newFn, void **orig) {
-    if (*orig) return *orig;                      // already installed
-    void *stub = shadowhook_hook_sym_name(lib, sym, newFn, orig);
-    if (stub) {
-        LOGI("hooked %s!%s -> orig=%p", lib, sym, *orig);
-    } else {
-        LOGW("hook %s!%s failed: %s", lib, sym,
-             shadowhook_to_errmsg(shadowhook_get_errno()));
+void *resolveSym(const char *lib, const char *sym) {
+    void *h = dlopen(lib, RTLD_NOLOAD | RTLD_NOW);
+    if (!h) h = dlopen(lib, RTLD_NOW);
+    if (!h) {
+        LOGW("dlopen(%s) failed: %s", lib, dlerror());
+        return nullptr;
     }
-    return stub;
+    void *p = dlsym(h, sym);
+    if (!p) LOGW("dlsym(%s!%s) failed: %s", lib, sym, dlerror());
+    return p;
+}
+
+bool installHook(const char *lib, const char *sym, void *newFn, void **orig) {
+    if (*orig) return true;                     // already installed
+    void *addr = resolveSym(lib, sym);
+    if (!addr) return false;
+    int rc = DobbyHook(addr, newFn, orig);
+    if (rc == 0 && *orig) {
+        LOGI("hooked %s!%s @%p -> orig=%p", lib, sym, addr, *orig);
+        return true;
+    }
+    LOGW("DobbyHook(%s!%s @%p) failed rc=%d", lib, sym, addr, rc);
+    *orig = nullptr;
+    return false;
 }
 
 } // namespace
 
 int Hooks_Install() {
-    static bool shInit = false;
-    if (!shInit) {
-        int rc = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
-        if (rc != 0) LOGE("shadowhook_init: %d (%s)", rc, shadowhook_to_errmsg(rc));
-        else { shInit = true; LOGI("shadowhook %s ready", shadowhook_get_version()); }
-    }
+    static bool logged = false;
+    if (!logged) { logged = true; LOGI("hook engine: Dobby %s", DobbyGetVersion()); }
 
     int n = 0;
+    if (installHook("libEGL.so", "eglSwapBuffers",
+                    (void *) hooked_swap, (void **) &orig_swap)) n++;
+    if (installHook("libEGL.so", "eglSwapBuffersWithDamageKHR",
+                    (void *) hooked_swap_khr, (void **) &orig_swap_khr)) n++;
+    if (installHook("libEGL.so", "eglSwapBuffersWithDamageEXT",
+                    (void *) hooked_swap_ext, (void **) &orig_swap_ext)) n++;
 
-    // the game presents through the KHR damage variant -> hook all three
-    if (hookName("libEGL.so", "eglSwapBuffers", (void *) hooked_swap, (void **) &orig_swap)) n++;
-    if (hookName("libEGL.so", "eglSwapBuffersWithDamageKHR",
-                 (void *) hooked_swap_khr, (void **) &orig_swap_khr)) n++;
-    if (hookName("libEGL.so", "eglSwapBuffersWithDamageEXT",
-                 (void *) hooked_swap_ext, (void **) &orig_swap_ext)) n++;
-
-    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionDown",
-                 (void *) hooked_down, (void **) &orig_down)) n++;
-    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionUp",
-                 (void *) hooked_up, (void **) &orig_up)) n++;
-    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionCancel",
-                 (void *) hooked_cancel, (void **) &orig_cancel)) n++;
-    if (hookName("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionMove",
-                 (void *) hooked_move, (void **) &orig_move)) n++;
+    if (installHook("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionDown",
+                    (void *) hooked_down, (void **) &orig_down)) n++;
+    if (installHook("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionUp",
+                    (void *) hooked_up, (void **) &orig_up)) n++;
+    if (installHook("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionCancel",
+                    (void *) hooked_cancel, (void **) &orig_cancel)) n++;
+    if (installHook("libcocos.so", "Java_com_cocos_lib_CocosTouchHandler_handleActionMove",
+                    (void *) hooked_move, (void **) &orig_move)) n++;
 
     LOGI("hooks installed: %d/7", n);
     return n;
