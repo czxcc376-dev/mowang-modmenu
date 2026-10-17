@@ -41,4 +41,4 @@ void Cheats_Reset();
 // ---- TapSDK signature bypass (implemented in signspoof.cpp) --------------
 // Redirects CommonUtils.getMD5([B)String so TapSDK reports the original
 // certificate digest.  Returns true once the redirect is actually installed.
-bool SignSpoof_Install();
+extern "C" bool SignSpoof_Install();
