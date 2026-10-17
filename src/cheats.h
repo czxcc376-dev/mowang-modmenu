@@ -16,6 +16,7 @@ struct CheatState {
     std::atomic<int>  speedMul{3};        // move speed * speedMul
     std::atomic<int>  frames{0};
     std::atomic<bool> bootstrapped{false};
+    std::atomic<bool> wantJS{false};       // set by the menu on first interaction
 };
 
 extern CheatState g_cheat;

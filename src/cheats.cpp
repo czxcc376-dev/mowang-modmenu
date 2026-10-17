@@ -50,18 +50,19 @@ const char *kBootstrap = R"JS(
 })();
 )JS";
 
-bool runWithBootstrap(const std::string &code) {
-    std::string full = std::string(kBootstrap) + "\n" + code;
-    return MW_RunJS(full.c_str());
-}
-
 std::string num(long long v) { return std::to_string(v); }
 
 } // namespace
 
 bool Cheats_RawJS(const char *js) {
     if (!js || !*js) return false;
-    return runWithBootstrap(js);
+    g_cheat.wantJS.store(true);          // engine is certainly up if we got here
+    if (!g_cheat.bootstrapped.load()) {
+        if (!MW_RunJS(kBootstrap)) return false;
+        g_cheat.bootstrapped.store(true);
+        LOGI("JS bootstrap injected (lazy)");
+    }
+    return MW_RunJS(js);
 }
 
 // ------------------------------------------------------------------ actions
@@ -149,10 +150,11 @@ void Cheats_Reset() {
 void Cheats_Tick() {
     int f = g_cheat.frames.fetch_add(1) + 1;
 
-    // one-shot bootstrap so __MW exists even before any button is pressed.
-    // MW_RunJS() refuses to run until the V8 engine is up, so keep trying until
-    // it succeeds instead of burning the single attempt on frame 1.
-    if (!g_cheat.bootstrapped.load()) {
+    // Bootstrap lazily and late.  evalString() dereferences the V8 engine
+    // singleton without a null check, so a frame-1 injection crashes the game
+    // before the engine exists.  Waiting for the menu to be interacted with
+    // guarantees the engine is well past initialisation.
+    if (!g_cheat.bootstrapped.load() && g_cheat.wantJS.load()) {
         if (MW_RunJS(kBootstrap)) {
             g_cheat.bootstrapped.store(true);
             LOGI("JS bootstrap injected");
