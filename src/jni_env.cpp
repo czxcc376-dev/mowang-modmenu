@@ -1,4 +1,5 @@
 #include "jni_env.h"
+#include "jsguard.h"
 #include "log.h"
 
 #include <dlfcn.h>
@@ -27,68 +28,23 @@ jmethodID g_flushTasks = nullptr;
 bool g_flushBroken = false;
 
 // ---------------------------------------------------------------------------
-// se::ScriptEngine singleton
+// Script engine readiness
 //
-// evalString() begins with
-//      0x39bc00  bl    0x3bcc00
-//    0x3bcc00  adrp  x8, #0x1a04000
-//    0x3bcc04  ldr   x0, [x8, #0x1b8]     <- the singleton
-// Calling evalString while it is null crashes at evalString+56 (fault 0xa4b8).
-//
-// The loadable segment holding that address has p_vaddr != p_offset
-// (0x19358b8 vs 0x19348b8), and dladdr()'s dli_fbase is the mapping start of the
-// p_offset==0 segment, so "base + vaddr" overshoots by 0x1000.  Rather than
-// hard-coding that correction we resolve the *runtime* address of the file offset
-// through /proc/self/maps, which is exact by construction.
+// evalString() dereferences the se::ScriptEngine singleton without a null check,
+// so calling it too early is fatal (SIGSEGV at evalString+56).  Guessing the
+// singleton's address from ELF offsets proved unreliable, so the call is made
+// under a SIGSEGV guard instead: a fault simply means "not ready, try later".
 // ---------------------------------------------------------------------------
-uintptr_t g_engineSlotAddr = 0;
-bool      g_engineReady = false;
-bool      g_engineProbeBroken = false;
+struct EvalCall {
+    EvalStringFn fn;
+    JNIEnv *env;
+    jclass cls;
+    jstring js;
+};
 
-// file offset of the singleton inside libcocos.so
-const unsigned long kEngineSlotFileOff = 0x1a031b8;
-
-bool resolveEngineSlot() {
-    if (g_engineSlotAddr) return true;
-
-    unsigned long base = 0;
-    unsigned long slot = 0;
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f) return false;
-
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        unsigned long start, end, off;
-        char perms[8], path[256];
-        path[0] = 0;
-        int n = sscanf(line, "%lx-%lx %7s %lx %*s %*s %255s", &start, &end, perms, &off, path);
-        if (n < 4) continue;
-        if (!strstr(path, "libcocos.so")) continue;
-
-        if (off == 0) base = start;
-        if (off <= kEngineSlotFileOff && kEngineSlotFileOff < off + (end - start)) {
-            slot = start + (kEngineSlotFileOff - off);
-            break;
-        }
-    }
-    fclose(f);
-
-    if (!base || !slot) {
-        static int logged = 0;
-        if (logged++ == 0) LOGW("engine slot: libcocos.so mapping not found yet");
-        return false;
-    }
-
-    g_engineSlotAddr = slot;
-    LOGI("engine slot @ %p (libcocos base %p)", (void *) slot, (void *) base);
-    return true;
-}
-
-bool engineExists() {
-    if (!resolveEngineSlot()) return false;
-    void *engine = nullptr;
-    memcpy(&engine, (void *) g_engineSlotAddr, sizeof(void *));
-    return engine != nullptr;
+void doEval(void *p) {
+    EvalCall *c = (EvalCall *) p;
+    c->fn(c->env, c->cls, c->js);
 }
 
 } // namespace
@@ -302,19 +258,6 @@ bool MW_RunJS(const char *code) {
     }
     if (!g_evalString) return false;
 
-    // Never call into the engine before it exists -- evalString dereferences the
-    // singleton unconditionally.
-    if (!g_engineReady) {
-        if (g_engineProbeBroken) return false;
-        if (!engineExists()) {
-            static int n = 0;
-            if (n++ % 120 == 0) LOGW("script engine not up yet, skipping JS");
-            return false;
-        }
-        g_engineReady = true;
-        LOGI("script engine is up, JS injection enabled");
-    }
-
     JNIEnv *env = MW_GetEnv();
     if (!env || !g_bridgeClass) return false;
 
@@ -323,11 +266,24 @@ bool MW_RunJS(const char *code) {
         env->ExceptionClear();
         return false;
     }
-    g_evalString(env, g_bridgeClass, js);
+
+    EvalCall call{g_evalString, env, g_bridgeClass, js};
+    bool ok = JSGuard_Call(doEval, &call);
+
     if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();
     }
     env->DeleteLocalRef(js);
+
+    if (!ok) {
+        static int n = 0;
+        if (n++ % 60 == 0) LOGW("evalString not usable yet (attempt %d)", n);
+        return false;
+    }
+    if (!g_engineReady) {
+        g_engineReady = true;
+        LOGI("script engine is up, JS injection enabled");
+    }
     return true;
 }

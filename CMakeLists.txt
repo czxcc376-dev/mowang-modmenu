@@ -43,7 +43,8 @@ add_library(mwmenu SHARED
   src/cheats.cpp
   src/jni_env.cpp
   src/signspoof.cpp           # TapSDK signature bypass
-  src/touchbridge.cpp)        # touch input via the game JS layer
+  src/touchbridge.cpp         # touch input via the game JS layer
+  src/jsguard.cpp)            # SIGSEGV-guarded evalString
 
 target_include_directories(mwmenu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mwmenu PRIVATE imgui dobby_static android log EGL GLESv3)
