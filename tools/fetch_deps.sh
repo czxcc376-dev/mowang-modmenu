@@ -62,10 +62,10 @@ def create(rel, content):
 #    clang 18 rejects it on ELF ("invalid fixup for add (uimm12)").
 #    NB: @PAGEOFF must be replaced before @PAGE ("@PAGE" is a prefix of "@PAGEOFF").
 edit("source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm", [
-    ("cdecl(common_closure_bridge_handler)@PAGEOFF",
-     ":lo12:cdecl(common_closure_bridge_handler)"),
-    ("cdecl(common_closure_bridge_handler)@PAGE",
-     "cdecl(common_closure_bridge_handler)"),
+    ("""adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE
+add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF""",
+     """adrp TMP_REG_0, :got:cdecl(common_closure_bridge_handler)
+ldr TMP_REG_0, [TMP_REG_0, :got_lo12:cdecl(common_closure_bridge_handler)]"""),
 ])
 
 # 2) dobby_static never receives BUILD_WITH_TRAMPOLINE_ASM and its compile

@@ -35,6 +35,9 @@ set(DOBBY_BUILD_EXAMPLE    OFF CACHE BOOL "" FORCE)
 set(DOBBY_BUILD_TEST       OFF CACHE BOOL "" FORCE)
 set(Plugin.SymbolResolver  ON  CACHE BOOL "" FORCE)
 add_subdirectory(${DOBBY_DIR} ${CMAKE_BINARY_DIR}/dobby_build)
+# we link dobby_static; the shared target is not needed (and its non-PIC
+# adrp against common_closure_bridge_handler used to fail to link)
+set_target_properties(dobby PROPERTIES EXCLUDE_FROM_ALL TRUE)
 
 # ------------------------------------------------------------------ module
 add_library(mwmenu SHARED
